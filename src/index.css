@@ -1,6 +1,4 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 /* Custom scrollbar to match premium look if needed */
 .hide-scrollbar::-webkit-scrollbar {
