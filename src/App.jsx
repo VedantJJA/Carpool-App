@@ -21,9 +21,10 @@ import {
     updateDoc,
     deleteDoc,
     arrayUnion,
-    arrayRemove,
     setDoc,
-    getDoc
+    getDoc,
+    orderBy,
+    limit
 } from 'firebase/firestore';
 import {
     Car,
@@ -41,8 +42,9 @@ import {
     MapPin,
     ArrowRight,
     UserCircle,
-    Phone,
-    Info
+    Info,
+    MessageSquare,
+    Send
 } from 'lucide-react';
 
 // --- Firebase Configuration ---
@@ -128,18 +130,17 @@ const Login = ({ onLogin, error }) => (
     </div>
 );
 
-// 2. Onboarding Component (Gender & Contact)
+// 2. Onboarding Component (Gender Only)
 const Onboarding = ({ onSubmit, initialName }) => {
     const [gender, setGender] = useState('');
-    const [contact, setContact] = useState('');
 
     return (
         <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
             <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
                 <h2 className="text-xl font-bold text-slate-800 mb-2">Complete Profile</h2>
-                <p className="text-slate-500 mb-6 text-sm">Welcome, <span className="font-semibold text-slate-800">{initialName}</span>! Please provide details to ensure safe travel.</p>
+                <p className="text-slate-500 mb-6 text-sm">Welcome, <span className="font-semibold text-slate-800">{initialName}</span>!</p>
 
-                <div className="mb-6">
+                <div className="mb-8">
                     <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Gender</label>
                     <div className="space-y-3">
                         {['Male', 'Female'].map((g) => (
@@ -158,23 +159,9 @@ const Onboarding = ({ onSubmit, initialName }) => {
                     </div>
                 </div>
 
-                <div className="mb-8">
-                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Contact Number</label>
-                    <input
-                        type="tel"
-                        value={contact}
-                        onChange={(e) => setContact(e.target.value)}
-                        placeholder="e.g. 9876543210"
-                        className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-500 focus:outline-none"
-                    />
-                    <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
-                        <Lock size={10} /> Only visible to room members
-                    </p>
-                </div>
-
                 <button
-                    disabled={!gender || contact.length < 10}
-                    onClick={() => onSubmit(gender, contact)}
+                    disabled={!gender}
+                    onClick={() => onSubmit(gender)}
                     className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 rounded-lg transition-colors"
                 >
                     Continue
@@ -250,7 +237,7 @@ export default function App() {
 
     // State restoration effect
     useEffect(() => {
-        if (userCurrentRoom) {
+        if (userCurrentRoom && profile) {
             // Restore selection state from the active room
             const destObj = DESTINATIONS.find(d => d.id === userCurrentRoom.destination);
             if (destObj) setDestination(destObj);
@@ -267,7 +254,7 @@ export default function App() {
                 setActiveTab('private');
             }
         }
-    }, [userCurrentRoom]);
+    }, [userCurrentRoom, profile]);
 
     // Fetch All Rooms when authenticated to check membership state
     useEffect(() => {
@@ -295,8 +282,13 @@ export default function App() {
 
                 // Time Range Match (+/- 3 hours)
                 const roomTimeMins = timeToMinutes(r.timeSlot);
-                const diff = Math.abs(roomTimeMins - userTimeMins);
-                // Handle midnight crossover edge cases if needed, but for now simple diff
+                let diff = Math.abs(roomTimeMins - userTimeMins);
+
+                // Handle midnight crossover (24 hours = 1440 minutes)
+                if (diff > 720) { // If difference is more than 12 hours, check the shorter path around midnight
+                    diff = 1440 - diff;
+                }
+
                 // 3 hours = 180 minutes
                 return diff <= 180;
             }));
@@ -318,7 +310,7 @@ export default function App() {
         }
     };
 
-    const handleOnboarding = async (gender, contact) => {
+    const handleOnboarding = async (gender) => {
         if (!user) return;
         try {
             // Use Google Display Name or fallback to extraction from email
@@ -326,7 +318,6 @@ export default function App() {
 
             const profileData = {
                 gender,
-                contact,
                 email: user.email,
                 name: nameToUse
             };
@@ -360,8 +351,7 @@ export default function App() {
             members: [{
                 uid: user.uid,
                 name: profile.name,
-                gender: profile.gender,
-                contact: profile.contact
+                gender: profile.gender
             }],
             createdAt: new Date().toISOString(),
             code: type === 'private' ? generateRoomCode() : null,
@@ -396,8 +386,7 @@ export default function App() {
                 members: arrayUnion({
                     uid: user.uid,
                     name: profile.name,
-                    gender: profile.gender,
-                    contact: profile.contact
+                    gender: profile.gender
                 })
             });
         } catch (err) {
@@ -440,11 +429,21 @@ export default function App() {
 
     const filteredPublicRooms = useMemo(() => {
         let list = relevantRooms.filter(r => r.type === 'public');
+
+        // STRICT GENDER VISIBILITY (Case Implies Title Case, but safety first)
+        const userGender = profile?.gender?.toLowerCase();
+
+        if (userGender === 'male') {
+            list = list.filter(r => r.genderReq !== 'Female Only');
+        } else if (userGender === 'female') {
+            list = list.filter(r => r.genderReq !== 'Male Only');
+        }
+
         if (filter === 'Male Only') list = list.filter(r => r.genderReq === 'Male Only');
         if (filter === 'Female Only') list = list.filter(r => r.genderReq === 'Female Only');
         if (filter === 'Common') list = list.filter(r => r.genderReq === 'Common');
         return list;
-    }, [relevantRooms, filter]);
+    }, [relevantRooms, filter, profile]);
 
     const myPrivateRooms = useMemo(() => {
         return allRooms.filter(r => r.type === 'private' && r.members.some(m => m.uid === user?.uid));
@@ -613,18 +612,26 @@ export default function App() {
                 {activeTab === 'public' && (
                     <>
                         <div className="flex gap-2 overflow-x-auto pb-4 hide-scrollbar">
-                            {['all', 'Male Only', 'Female Only', 'Common'].map(f => (
-                                <button
-                                    key={f}
-                                    onClick={() => setFilter(f)}
-                                    className={`px-4 py-2 rounded-full text-xs font-medium whitespace-nowrap border transition-colors ${filter === f
-                                        ? 'bg-slate-800 text-white border-slate-800'
-                                        : 'bg-white text-slate-600 border-slate-200'
-                                        }`}
-                                >
-                                    {f === 'all' ? 'All Rooms' : f}
-                                </button>
-                            ))}
+                            {['all', 'Male Only', 'Female Only', 'Common']
+                                .filter(f => {
+                                    if (!profile?.gender) return true;
+                                    const g = profile.gender.toLowerCase();
+                                    if (g === 'male' && f === 'Female Only') return false;
+                                    if (g === 'female' && f === 'Male Only') return false;
+                                    return true;
+                                })
+                                .map(f => (
+                                    <button
+                                        key={f}
+                                        onClick={() => setFilter(f)}
+                                        className={`px-4 py-2 rounded-full text-xs font-medium whitespace-nowrap border transition-colors ${filter === f
+                                            ? 'bg-slate-800 text-white border-slate-800'
+                                            : 'bg-white text-slate-600 border-slate-200'
+                                            }`}
+                                    >
+                                        {f === 'all' ? 'All Rooms' : f}
+                                    </button>
+                                ))}
                         </div>
 
                         <div className="space-y-4">
@@ -835,31 +842,27 @@ const RoomCard = ({ room, currentUser, onJoin, onLeave }) => {
                     {room.members.map(m => (
                         <div key={m.uid} className="flex items-center justify-between text-sm bg-white p-2 rounded border border-slate-100">
                             <span className="text-slate-700 font-medium text-xs">{m.name}</span>
-                            {isMember ? (
-                                <a href={`tel:${m.contact}`} className="text-blue-600 text-xs flex items-center gap-1 hover:underline">
-                                    <Phone size={10} /> {m.contact}
-                                </a>
-                            ) : (
-                                <span className="text-slate-300 text-xs">••••••••••</span>
-                            )}
                         </div>
                     ))}
 
-                    {/* Empty Slots */}
-                    <div className="flex flex-wrap gap-2 mt-2">
-                        {Array.from({ length: spotsLeft }).map((_, i) => (
-                            <span key={i} className="text-[10px] border border-dashed border-slate-300 px-2 py-1 rounded text-slate-400">
-                                Open Slot
-                            </span>
-                        ))}
-                    </div>
+                </div>
+
+                {/* Empty Slots */}
+                <div className="flex flex-wrap gap-2 mt-2">
+                    {Array.from({ length: spotsLeft }).map((_, i) => (
+                        <span key={i} className="text-[10px] border border-dashed border-slate-300 px-2 py-1 rounded text-slate-400">
+                            Open Slot
+                        </span>
+                    ))}
                 </div>
             </div>
+
+            {isMember && <ChatSection roomId={room.id} user={currentUser} db={db} appId={appId} />}
 
             {isMember ? (
                 <button
                     onClick={onLeave}
-                    className="w-full border border-red-200 text-red-600 py-2 rounded-lg text-sm font-medium hover:bg-red-50 transition-colors"
+                    className="w-full border border-red-200 text-red-600 py-2 rounded-lg text-sm font-medium hover:bg-red-50 transition-colors mt-2"
                 >
                     Leave Room
                 </button>
@@ -872,6 +875,79 @@ const RoomCard = ({ room, currentUser, onJoin, onLeave }) => {
                     {spotsLeft === 0 ? 'Full' : 'Join Room'}
                 </button>
             )}
+        </div>
+    );
+};
+
+// Chat Component
+const ChatSection = ({ roomId, user, db, appId }) => {
+    const [messages, setMessages] = useState([]);
+    const [newMessage, setNewMessage] = useState('');
+    const scrollRef = React.useRef(null);
+
+    useEffect(() => {
+        const q = query(
+            collection(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId, 'messages'),
+            orderBy('timestamp', 'asc')
+        );
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            setMessages(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+            if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        });
+        return () => unsubscribe();
+    }, [roomId]);
+
+    const handleSend = async (e) => {
+        e.preventDefault();
+        if (!newMessage.trim()) return;
+
+        try {
+            await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'rooms', roomId, 'messages'), {
+                text: newMessage,
+                senderId: user.uid,
+                senderName: user.displayName || 'User',
+                timestamp: new Date().toISOString()
+            });
+            setNewMessage('');
+        } catch (err) {
+            console.error("Error sending message", err);
+        }
+    };
+
+    return (
+        <div className="border-t border-slate-100 pt-3">
+            <h4 className="text-xs font-bold text-slate-500 mb-2 flex items-center gap-1">
+                <MessageSquare size={12} /> Chat
+            </h4>
+            <div
+                ref={scrollRef}
+                className="bg-slate-50 rounded-lg p-3 h-40 overflow-y-auto mb-2 space-y-2 text-xs"
+            >
+                {messages.length === 0 && <p className="text-slate-400 text-center italic">No messages yet. Say hi!</p>}
+                {messages.map(msg => {
+                    const isMe = msg.senderId === user.uid;
+                    return (
+                        <div key={msg.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[85%] p-2 rounded-lg ${isMe ? 'bg-blue-100 text-blue-900 rounded-tr-none' : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none'}`}>
+                                {!isMe && <p className="text-[9px] font-bold text-slate-500 mb-0.5">{msg.senderName}</p>}
+                                <p>{msg.text}</p>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+            <form onSubmit={handleSend} className="flex gap-2">
+                <input
+                    type="text"
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    placeholder="Type a message..."
+                    className="flex-1 text-xs border border-slate-200 rounded-lg px-2 py-2 focus:outline-none focus:border-blue-500"
+                />
+                <button type="submit" className="bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600">
+                    <Send size={14} />
+                </button>
+            </form>
         </div>
     );
 };
