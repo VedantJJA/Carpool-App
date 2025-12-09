@@ -66,16 +66,22 @@ const DESTINATIONS = [
     { id: 'airport', name: 'Chennai Airport', icon: Plane },
     { id: 'railway', name: 'Railway Station', icon: Train },
     { id: 'mgr', name: 'MGR Station', icon: MapPin },
-    { id: 'vitc', name: 'VIT Chennai', icon: Building2 },
 ];
 
 const TIME_SLOTS = [
-    "00:00", "03:00", "06:00", "09:00",
-    "12:00", "15:00", "18:00", "21:00"
+    "00:00", "01:30", "03:00", "04:30",
+    "06:00", "07:30", "09:00", "10:30",
+    "12:00", "13:30", "15:00", "16:30",
+    "18:00", "19:30", "21:00", "22:30"
 ];
 
 // --- Helper Functions ---
 const generateRoomCode = () => Math.floor(100000 + Math.random() * 900000).toString();
+const generateSerialNumber = () => Math.floor(1000 + Math.random() * 9000).toString(); // 4 digit serial
+const timeToMinutes = (time) => {
+    const [h, m] = time.split(':').map(Number);
+    return h * 60 + m;
+};
 
 const extractNameFromEmail = (email) => {
     if (!email) return 'Student';
@@ -186,6 +192,7 @@ export default function App() {
     const [step, setStep] = useState('loading'); // loading, login, onboarding, selection, rooms
 
     // Selection State
+    const [direction, setDirection] = useState('TO_VIT'); // 'TO_VIT' or 'FROM_VIT'
     const [destination, setDestination] = useState(null);
     const [date, setDate] = useState('');
     const [timeSlot, setTimeSlot] = useState('');
@@ -241,6 +248,27 @@ export default function App() {
         return () => unsubscribe();
     }, []);
 
+    // State restoration effect
+    useEffect(() => {
+        if (userCurrentRoom) {
+            // Restore selection state from the active room
+            const destObj = DESTINATIONS.find(d => d.id === userCurrentRoom.destination);
+            if (destObj) setDestination(destObj);
+
+            setDate(userCurrentRoom.date);
+            setTimeSlot(userCurrentRoom.timeSlot);
+            if (userCurrentRoom.direction) setDirection(userCurrentRoom.direction);
+
+            // Jump to rooms view
+            setStep('rooms');
+
+            // If it's a private room, open the private tab
+            if (userCurrentRoom.type === 'private') {
+                setActiveTab('private');
+            }
+        }
+    }, [userCurrentRoom]);
+
     // Fetch All Rooms when authenticated to check membership state
     useEffect(() => {
         if (user) {
@@ -257,15 +285,25 @@ export default function App() {
     // Derive relevant Rooms
     useEffect(() => {
         if (destination && date && timeSlot && allRooms.length > 0) {
-            setRelevantRooms(allRooms.filter(r =>
-                r.destination === destination.id &&
-                r.date === date &&
-                r.timeSlot === timeSlot
-            ));
+            const userTimeMins = timeToMinutes(timeSlot);
+
+            setRelevantRooms(allRooms.filter(r => {
+                // Basic Match
+                if (r.destination !== destination.id) return false;
+                if (r.date !== date) return false;
+                if (r.direction !== direction) return false;
+
+                // Time Range Match (+/- 3 hours)
+                const roomTimeMins = timeToMinutes(r.timeSlot);
+                const diff = Math.abs(roomTimeMins - userTimeMins);
+                // Handle midnight crossover edge cases if needed, but for now simple diff
+                // 3 hours = 180 minutes
+                return diff <= 180;
+            }));
         } else {
             setRelevantRooms([]);
         }
-    }, [allRooms, destination, date, timeSlot]);
+    }, [allRooms, destination, date, timeSlot, direction]);
 
     // --- Handlers ---
 
@@ -311,7 +349,8 @@ export default function App() {
 
         const newRoom = {
             hostId: user.uid,
-            hostName: profile.name,
+            hostName: profile.name, // Keep for metadata, but display Serial #
+            direction,
             destination: destination.id,
             date,
             timeSlot,
@@ -325,7 +364,8 @@ export default function App() {
                 contact: profile.contact
             }],
             createdAt: new Date().toISOString(),
-            code: type === 'private' ? generateRoomCode() : null
+            code: type === 'private' ? generateRoomCode() : null,
+            serialNumber: generateSerialNumber()
         };
 
         try {
@@ -436,6 +476,24 @@ export default function App() {
                 <main className="flex-1 p-6 max-w-2xl mx-auto w-full">
                     <h2 className="text-2xl font-bold text-slate-800 mb-6">Plan your trip</h2>
 
+                    {/* 0. Direction */}
+                    <section className="mb-8">
+                        <div className="flex bg-slate-200 p-1 rounded-xl">
+                            <button
+                                onClick={() => setDirection('TO_VIT')}
+                                className={`flex-1 py-3 px-4 rounded-lg font-bold text-sm transition-all ${direction === 'TO_VIT' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                            >
+                                To VIT
+                            </button>
+                            <button
+                                onClick={() => setDirection('FROM_VIT')}
+                                className={`flex-1 py-3 px-4 rounded-lg font-bold text-sm transition-all ${direction === 'FROM_VIT' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                            >
+                                From VIT
+                            </button>
+                        </div>
+                    </section>
+
                     {/* 1. Destination */}
                     <section className="mb-8">
                         <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-3">1. Select Destination</h3>
@@ -505,7 +563,15 @@ export default function App() {
             <header className="bg-white p-4 shadow-sm sticky top-0 z-10">
                 <div className="max-w-3xl mx-auto">
                     <div className="flex justify-between items-center mb-4">
-                        <button onClick={() => setStep('selection')} className="text-slate-500 text-sm hover:text-slate-800 flex items-center gap-1">
+                        <button
+                            onClick={async () => {
+                                if (userCurrentRoom) {
+                                    await handleLeaveRoom(userCurrentRoom.id, userCurrentRoom.members);
+                                }
+                                setStep('selection');
+                            }}
+                            className="text-slate-500 text-sm hover:text-slate-800 flex items-center gap-1"
+                        >
                             ← Back
                         </button>
                         <div className="flex items-center gap-2 text-slate-600 text-sm">
@@ -515,7 +581,7 @@ export default function App() {
                     <div className="flex items-center justify-between">
                         <div>
                             <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-                                {destination.name}
+                                {direction === 'TO_VIT' ? `${destination.name} → VIT Chennai` : `VIT Chennai → ${destination.name}`}
                             </h1>
                             <p className="text-slate-500 text-sm flex items-center gap-2">
                                 <Calendar size={14} /> {date} <Clock size={14} /> {timeSlot}
@@ -676,16 +742,22 @@ export default function App() {
 
                             {activeTab === 'public' ? (
                                 <>
-                                    {['Male Only', 'Female Only', 'Common'].map(type => (
-                                        <button
-                                            key={type}
-                                            onClick={() => handleCreateRoom('public', type)}
-                                            className="w-full text-left p-3 rounded-lg border hover:bg-slate-50 text-sm font-medium flex justify-between"
-                                        >
-                                            <span>{type} (Public)</span>
-                                            <span className="text-slate-400">→</span>
-                                        </button>
-                                    ))}
+                                    {['Male Only', 'Female Only', 'Common']
+                                        .filter(t => {
+                                            if (profile.gender === 'Male' && t === 'Female Only') return false;
+                                            if (profile.gender === 'Female' && t === 'Male Only') return false;
+                                            return true;
+                                        })
+                                        .map(type => (
+                                            <button
+                                                key={type}
+                                                onClick={() => handleCreateRoom('public', type)}
+                                                className="w-full text-left p-3 rounded-lg border hover:bg-slate-50 text-sm font-medium flex justify-between"
+                                            >
+                                                <span>{type} (Public)</span>
+                                                <span className="text-slate-400">→</span>
+                                            </button>
+                                        ))}
                                 </>
                             ) : (
                                 <button
@@ -740,7 +812,12 @@ const RoomCard = ({ room, currentUser, onJoin, onLeave }) => {
                         {room.hostName[0]}
                     </div>
                     <div>
-                        <p className="text-sm font-medium text-slate-800">{room.hostName}'s Room</p>
+                        <p className="text-sm font-bold text-slate-800">Room #{room.serialNumber || room.id.slice(0, 4).toUpperCase()}</p>
+                        <p className="text-[10px] text-slate-500 font-medium mb-1">
+                            {room.direction === 'TO_VIT'
+                                ? `${DESTINATIONS.find(d => d.id === room.destination)?.name || 'Unknown'} → VIT`
+                                : `VIT → ${DESTINATIONS.find(d => d.id === room.destination)?.name || 'Unknown'}`}
+                        </p>
                         <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wide ${tagColor}`}>
                             {room.genderReq}
                         </span>
